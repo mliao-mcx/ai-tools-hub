@@ -1,0 +1,86 @@
+name: Ingest New AI Tools to Vector DB
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/*.md'
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Get changed tool files
+        id: changed
+        run: |
+          FILES=$(git diff --name-only HEAD~1 HEAD -- 'tools/*.md' | tr '\n' ',')
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+          echo "Changed files: $FILES"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install gray-matter
+
+      - name: Ingest to Qdrant via RAG API
+        env:
+          RAG_API_URL: ${{ secrets.RAG_API_URL }}
+          RAG_API_KEY: ${{ secrets.RAG_API_KEY }}
+        run: |
+          node -e "
+          const fs = require('fs');
+          const path = require('path');
+          const matter = require('gray-matter');
+
+          const files = '${{ steps.changed.outputs.files }}'.split(',').filter(f => f.endsWith('.md'));
+          const apiUrl = process.env.RAG_API_URL || 'https://api.88669977.xyz';
+
+          async function ingest(file) {
+            const content = fs.readFileSync(file, 'utf8');
+            const { data, content: body } = matter(content);
+
+            const payload = {
+              slug: data.slug || path.basename(file, '.md'),
+              title: data.title || path.basename(file, '.md'),
+              category: data.category || '未分类',
+              tags: data.tags || [],
+              one_line_summary: data.oneLineSummary || '',
+              content: body,
+              url: 'https://tools-hub-indol.vercel.app/tools/' + (data.slug || path.basename(file, '.md'))
+            };
+
+            console.log('Ingesting:', payload.title);
+
+            const resp = await fetch(apiUrl + '/ingest', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+
+            const result = await resp.json();
+            console.log('Result:', JSON.stringify(result));
+          }
+
+          (async () => {
+            for (const file of files) {
+              try {
+                await ingest(file);
+              } catch (e) {
+                console.error('Error ingesting', file, e.message);
+              }
+            }
+            console.log('Done! Ingested', files.length, 'tools.');
+          })();
+          "
+
+      - name: Trigger Vercel redeploy
+        run: |
+          curl -X POST "${{ secrets.VERCEL_DEPLOY_HOOK }}" || echo "No deploy hook configured"
